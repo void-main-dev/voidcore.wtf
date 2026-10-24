@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>void</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --fg: #f3e9ec; --dim: #8a7c80; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #enter {
+    position: fixed; inset: 0; display: grid; place-items: center; cursor: pointer;
+    font: 400 14px "Geist Mono", monospace; letter-spacing: .5em; color: var(--dim);
+    transition: opacity .6s;
+  }
+  #enter span { animation: blink 2.4s ease-in-out infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  #enter.gone { opacity: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="enter"><span>click to enter</span></div>
+
+<script id="fs" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+uniform sampler2D uEye, uIris, uAtlas;
+uniform vec2 uRes, uCell, uEyeSize;
+uniform vec4 uIrisBox;          // x0, y0, size (photo px), texture size
+uniform vec2 uCam;              // camera centre, photo px
+uniform float uScale;           // photo px per device px
+uniform float uN, uNT;          // ramp glyphs, total glyphs (ramp + star glyphs)
+uniform float uReveal, uStars, uStarsAll, uEyeAmt, uHeart, uHeartUnit, uGlow, uTime;
+uniform vec2 uHeartC;            // heart centre, photo px (pupil centre)
+uniform float uGamma, uDebug, uLo, uIB, uCB, uK, uLC, uDi;
+out vec4 o;
+
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+vec3 tone(vec3 c) {               // same as Ascii.to_image: lift darks, boost saturation
+  c = pow(clamp(c, 0.0, 1.0), vec3(uGamma));
+  float l = dot(c, vec3(0.30, 0.55, 0.15));
+  return clamp(mix(vec3(l), c, 1.6), 0.0, 1.0);
+}
+
+float glyph(float idx, vec2 f) {
+  return texture(uAtlas, vec2((idx + f.x) / uNT, f.y)).a;
+}
+
+void main() {
+  vec2 pix = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+  vec2 cell = floor(pix / uCell);
+  vec2 f = fract(pix / uCell);
+  vec2 sc = (cell + 0.5) * uCell;
+  vec2 p = uCam + (sc - 0.5 * uRes) * uScale;
+  float h0 = hash(cell), h1 = hash(cell + 17.3), h2 = hash(cell * 1.37 + 3.1);
+
+  // ---- eye ----
+  float cellPhoto = uCell.x * uScale;
+  float lodE = log2(max(cellPhoto, 1e-4));
+  float lodI = log2(max(cellPhoto * uIrisBox.w / uIrisBox.z, 1e-4));
+  vec2 uv = p / uEyeSize;
+  float inEye = smoothstep(0.0, 0.02, uv.x) * smoothstep(1.0, 0.98, uv.x) * smoothstep(0.0, 0.02, uv.y) * smoothstep(1.0, 0.98, uv.y);
+  vec4 e0 = textureLod(uEye, uv, lodE);
+  vec3 raw = e0.rgb * inEye;
+  vec3 rawB = textureLod(uEye, uv, lodE + 2.6).rgb * inEye;
+  vec2 q = (p - uIrisBox.xy) / uIrisBox.z;
+  float wI = smoothstep(0.0, 0.1, q.x) * smoothstep(1.0, 0.9, q.x) * smoothstep(0.0, 0.1, q.y) * smoothstep(1.0, 0.9, q.y);
+  vec4 i0 = textureLod(uIris, q, max(lodI, 0.0));
+  raw = mix(raw, i0.rgb, wI);
+  rawB = mix(rawB, textureLod(uIris, q, max(lodI + 2.6, 0.0)).rgb, wI);
+  // iris mask baked into alpha as 0.5..1 (lid already cut out), pupil excluded
+  float dI = length(p - uHeartC) / 142.0;
+  float irisM = clamp(2.0 * mix(e0.a, i0.a, wI) - 1.0, 0.0, 1.0) * inEye * smoothstep(0.30, 0.36, dI);
+  vec3 c = tone(raw);
+  vec3 cb = tone(rawB);
+  float L = dot(c, vec3(0.30, 0.55, 0.15));
+  float Lb = dot(cb, vec3(0.30, 0.55, 0.15));
+  float Ln = max(pow(clamp((L + uLC * (L - Lb) - 0.08) / 0.92, 0.0, 1.0), 1.1), 0.95 * L);
+  Ln = pow(clamp((Ln - uLo) / (0.92 - uLo), 0.0, 1.0), uK);        // stretch + curve: brow and lashes sparse, skin mid, sclera dense
+  float Li = 0.18 + 0.78 * smoothstep(uIB, 0.80, L + 0.6 * (L - Lb));   // iris: its own range, limbus sparse .. collarette dense
+  Ln = mix(Ln, Li, irisM);
+  float idx = clamp(floor(Ln * (uN - 1.0) + (h0 - 0.5) * uDi), 0.0, uN - 1.0);
+  // forming: cells switch on at random, scrambling just before they settle
+  float th = 0.75 * cell.y * uCell.y / uRes.y + 0.17 * h1;   // rows sweep in from the top
+  float on = smoothstep(th, th + 0.06, uReveal);
+  if (on < 1.0) idx = floor(hash(cell + floor(uTime * 14.0)) * (uN - 1.0));
+  float mx = max(max(c.r, c.g), max(c.b, 0.04));
+  vec3 hue = c / mx;
+  vec3 col = min(hue * (uCB + (1.1 - uCB) * Ln), 1.0);          // brightness follows the glyph ramp
+  vec3 eye = col * glyph(idx, f) * on * uEyeAmt;
+  eye *= 1.0 - uStars * smoothstep(0.24, 0.16, L);               // during the dive the pupil empties into black
+
+  // ---- stars: fill the dark of the pupil ----
+  float dark = smoothstep(0.30, 0.12, L) * uStars + uStarsAll;
+  vec3 star = vec3(0.0);
+  float tw = 0.55 + 0.45 * sin(uTime * (1.5 + 4.0 * h1) + h0 * 6.283);
+  if (h2 < 0.045) {
+    float sidx = uN + floor(hash(cell + 5.0) * 4.0);          // + | - •
+    vec3 sc0 = mix(vec3(1.0, 0.86, 0.92), vec3(0.85, 0.9, 1.0), h1);
+    star = sc0 * glyph(sidx, f) * tw * (0.5 + 0.5 * h0);
+  }
+  for (int k = 0; k < 4; k++) {                               // sparkle crosses around bright stars
+    vec2 d = k == 0 ? vec2(1, 0) : k == 1 ? vec2(-1, 0) : k == 2 ? vec2(0, 1) : vec2(0, -1);
+    vec2 nc = cell + d;
+    if (hash(nc * 1.37 + 3.1) < 0.006) {
+      float twn = 0.55 + 0.45 * sin(uTime * (1.5 + 4.0 * hash(nc + 17.3)) + hash(nc) * 6.283);
+      float sidx = uN + (k < 2 ? 2.0 : 1.0);
+      star = max(star, vec3(1.0, 0.9, 0.95) * glyph(sidx, f) * twn * 0.8);
+    }
+  }
+  if (hash(cell * 1.37 + 3.1) < 0.006) star = vec3(1.0) * glyph(uN + 4.0, f) * tw;   // centre *
+  vec3 outc = eye + star * dark;
+
+  // ---- heart ----
+  if (uHeart > 0.0) {
+    // lives in photo space: a dot of red cells far away, a heart once we are close
+    vec2 hc0 = 0.5 * uRes + (uHeartC - uCam) / uScale;
+    float sTrue = uHeartUnit / uScale;
+    float s = max(sTrue, 0.55 * uCell.y);
+    vec2 hp = (sc - hc0) / s;
+    float x = hp.x * 0.95, y = -hp.y + 0.12;
+    float a = x * x + y * y - 1.0;
+    float F = a * a * a - x * x * y * y * y;
+    float r = length(vec2(x, y - 0.25)) / 1.15;
+    float dot0 = smoothstep(2.0 * uCell.y, 0.8 * uCell.y, sTrue);   // far away: plain red
+    float rag = (h0 - 0.5) * 0.10 * (1.0 - dot0);             // ragged outline: edge cells drop in and out
+    if (F <= rag) {
+      // soft letter heart: thin sparse glyphs on the rim, dense letters inside, pink-white core
+      float D = pow(clamp(-F, 0.0, 1.0), 0.33);              // ~0 at the rim .. 1 at the centre
+      vec3 hc = mix(vec3(0.85, 0.08, 0.22), vec3(1.0, 0.34, 0.55), smoothstep(0.05, 0.55, D));
+      hc = mix(hc, vec3(1.0, 0.86, 0.92), smoothstep(0.62, 0.95, D));
+      hc = mix(hc, vec3(1.0, 0.12, 0.25), dot0);
+      float tw2 = 0.85 + 0.15 * sin(uTime * (1.5 + 3.0 * h1) + h0 * 6.283);
+      float hidx = clamp(floor((0.10 + 0.88 * pow(D, 0.6)) * (uN - 1.0) + (h2 - 0.5) * 9.0), 1.0, uN - 1.0);
+      hidx = mix(hidx, uN - 1.0, dot0);
+      float br = mix(0.62 + 0.5 * D, 1.0, dot0);
+      outc = mix(outc, hc * br * tw2 * glyph(hidx, f), uHeart);
+    } else {
+      float g = exp(-F * 6.0) * 0.30 * uHeart * (1.0 - dot0);  // faint pink halo
+      if (h2 < 0.18) outc += vec3(1.0, 0.35, 0.55) * g * glyph(floor(h0 * 8.0), f);
+      // the pupil around the heart is not empty: sparse pink glyphs, thinning towards the iris
+      float pr = length(hp) * uHeartUnit / (0.30 * 142.0);
+      float gl2 = uGlow * smoothstep(1.0, 0.2, pr) * (1.0 - dot0);
+      float tw3 = 0.6 + 0.4 * sin(uTime * (1.0 + 2.0 * h0) + h1 * 6.283);
+      if (h1 < 0.22 * gl2) outc = max(outc, mix(vec3(0.95, 0.25, 0.45), vec3(1.0, 0.6, 0.75), h0) * (0.5 + 0.35 * gl2) * tw3 * glyph(floor(10.0 + h2 * 22.0), f));
+    }
+  }
+  o = vec4(uDebug > 3.5 ? vec3(idx / (uN - 1.0)) : uDebug > 2.5 ? col : uDebug > 1.5 ? vec3(Ln) : uDebug > 0.5 ? raw : outc, 1.0);
+}
+</script>
+
+<script>
+const RAMP = " .`'-:;,\"^~!i|l/\\()rtjfxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$";
+const STARS = "+|-•*";
+const EYE = { w: 2280, h: 1400, cx: 1165, cy: 865, R: 142 };
+const IRIS = { x0: EYE.cx - 1.3 * EYE.R, y0: EYE.cy - 1.3 * EYE.R, size: 2.6 * EYE.R, tex: 3072 };
+
+const cv = document.getElementById('c');
+const gl = cv.getContext('webgl2', { antialias: false, premultipliedAlpha: false });
+
+function shader(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, shader(gl.VERTEX_SHADER, `#version 300 es
+in vec2 a; void main() { gl_Position = vec4(a, 0.0, 1.0); }`));
+gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, document.getElementById('fs').textContent));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+const loc = gl.getAttribLocation(prog, 'a');
+gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+const U = n => gl.getUniformLocation(prog, n);
+
+function texture(unit, src, mip) {
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+  if (mip) gl.generateMipmap(gl.TEXTURE_2D);
+  return t;
+}
+const load = src => new Promise((ok, err) => { const i = new Image(); i.onload = () => ok(i); i.onerror = err; i.src = src; });
+
+let cell = [10, 19];
+function atlas() {                       // one row of glyphs, white on transparent, at device pixels
+  const all = RAMP + STARS;
+  const c = document.createElement('canvas');
+  c.width = cell[0] * all.length; c.height = cell[1];
+  const x = c.getContext('2d');
+  x.fillStyle = '#fff'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.font = `700 ${Math.round(cell[1] * 0.82)}px "Geist Mono", monospace`;
+  [...all].forEach((ch, i) => x.fillText(ch, (i + 0.5) * cell[0], cell[1] * 0.54));
+  // order the ramp by real ink coverage in this font and size, so density tracks brightness
+  const px = x.getImageData(0, 0, c.width, c.height).data;
+  const ink = [...RAMP].map((ch, i) => {
+    let s = 0;
+    for (let yy = 0; yy < cell[1]; yy++) for (let xx = i * cell[0]; xx < (i + 1) * cell[0]; xx++) s += px[(yy * c.width + xx) * 4 + 3];
+    return [ch, s];
+  });
+  const sorted = ink.sort((a, b) => a[1] - b[1]).map(a => a[0]).join('') + STARS;
+  x.clearRect(0, 0, c.width, c.height);
+  [...sorted].forEach((ch, i) => x.fillText(ch, (i + 0.5) * cell[0], cell[1] * 0.54));
+  texture(2, c, false);
+  gl.uniform1f(U('uN'), RAMP.length); gl.uniform1f(U('uNT'), all.length);
+}
+
+function resize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = Math.round(innerWidth * dpr); cv.height = Math.round(innerHeight * dpr);
+  gl.viewport(0, 0, cv.width, cv.height);
+  const ch = Math.max(12, Math.round(cv.height / 76));
+  cell = [Math.round(ch * 0.55), ch];
+  atlas();
+  gl.uniform2f(U('uRes'), cv.width, cv.height);
+  gl.uniform2f(U('uCell'), cell[0], cell[1]);
+}
+
+// ---- timeline (seconds after click) ----
+const ease = t => t < 0 ? 0 : t > 1 ? 1 : t * t * (3 - 2 * t);
+const seg = (t, a, b) => ease((t - a) / (b - a));
+function frame(t) {
+  const H = cv.height;
+  const s0 = Math.min(1000 / H, 2200 / cv.width);      // eye + brow, photo covers the screen
+  const pupilD = 2 * 0.30 * EYE.R;
+  const HU = 10;                                       // heart unit, photo px: the heart is ~0.28 of the pupil, from dot to end
+  const s1 = Math.min(2.4 * HU / (0.32 * cv.width), pupilD / (1.02 * Math.hypot(cv.width, H)));   // heart ends ~32% wide, pupil covers the screen
+  const z = (t - 2.2) / (13.5 - 2.2);
+  const zz = ease(z);                                  // gentle start and end; the iris ring slides out past the edges
+  const scale = s0 * Math.pow(s1 / s0, zz);
+  const cx = EYE.cx, cy = EYE.cy;
+  return {
+    reveal: seg(t, 0.2, 1.7), scale, cx, cy,
+    stars: seg(t, 6.0, 9.5), starsAll: 0.6 * seg(t, 11.0, 13.0),
+    eye: 1,
+    heart: seg(t, 3.0, 4.5),                            // red dot in the pupil; grows with the zoom
+    heartUnit: HU,
+    glow: seg(t, 5.0, 8.5) * (1 - seg(t, 10.0, 12.0)),   // pink glyphs fill the pupil around the heart
+  };
+}
+
+let start = null;
+const Q = new URLSearchParams(location.search);
+const GAMMA = Q.has('g') ? parseFloat(Q.get('g')) : 0.45;
+const num = (k, d) => Q.has(k) ? parseFloat(Q.get(k)) : d;
+const LO = Q.has('lo') ? parseFloat(Q.get('lo')) : 0.3;
+const DEBUG = Q.has('d') ? parseFloat(Q.get('d')) : 0;   // 1 raw photo, 2 glyph brightness
+const FREEZE = Q.has('f') ? parseFloat(Q.get('f')) : null;   // ?f=6.5 holds that moment (for checks)
+function draw(now) {
+  const t = FREEZE !== null ? FREEZE : start === null ? 0 : (now - start) / 1000;
+  const k = frame(start === null && FREEZE === null ? -1 : t);
+  gl.uniform2f(U('uCam'), k.cx, k.cy);
+  gl.uniform1f(U('uScale'), k.scale);
+  gl.uniform1f(U('uReveal'), k.reveal);
+  gl.uniform1f(U('uStars'), k.stars);
+  gl.uniform1f(U('uStarsAll'), k.starsAll);
+  gl.uniform1f(U('uEyeAmt'), k.eye);
+  gl.uniform1f(U('uHeart'), k.heart);
+  gl.uniform1f(U('uHeartUnit'), k.heartUnit);
+  gl.uniform1f(U('uGlow'), k.glow);
+  gl.uniform2f(U('uHeartC'), EYE.cx, EYE.cy);
+  gl.uniform1f(U('uTime'), now / 1000);
+  gl.uniform1f(U('uGamma'), GAMMA);
+  gl.uniform1f(U('uDebug'), DEBUG);
+  gl.uniform1f(U('uLo'), LO);
+  gl.uniform1f(U('uIB'), num('ib', 0.10));
+  gl.uniform1f(U('uCB'), num('cb', 0.75));
+  gl.uniform1f(U('uK'), num('k', 1.8));
+  gl.uniform1f(U('uLC'), num('lc', 2.0));
+  gl.uniform1f(U('uDi'), num('di', 3.0));
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(draw);
+}
+
+(async () => {
+  await document.fonts.load('700 16px "Geist Mono"').catch(() => {});
+  const [eye, iris] = await Promise.all([load('eye.webp?v=7'), load('iris.webp?v=7')]);
+  texture(0, eye, true); texture(1, iris, true);
+  gl.uniform1i(U('uEye'), 0); gl.uniform1i(U('uIris'), 1); gl.uniform1i(U('uAtlas'), 2);
+  gl.uniform2f(U('uEyeSize'), EYE.w, EYE.h);
+  gl.uniform4f(U('uIrisBox'), IRIS.x0, IRIS.y0, IRIS.size, IRIS.tex);
+  resize(); addEventListener('resize', resize);
+  const go = () => { if (start !== null) return; start = performance.now(); document.getElementById('enter').classList.add('gone'); };
+  document.getElementById('enter').addEventListener('click', go);
+  if (FREEZE !== null) document.getElementById('enter').classList.add('gone');
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>

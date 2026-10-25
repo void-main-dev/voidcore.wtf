@@ -325,6 +325,7 @@ uniform vec4 uCard;              // the card on screen, px (x0, y0, x1, y1); zer
 uniform float uCardRun;          // 0..1: blood leaving the card
 uniform float uDrip;             // blood running from the heart, 0..1
 uniform float uBeat;             // the heart's last beat, 0..1, already faded
+uniform vec4 uRip;               // the last two beats: seconds since, strength, seconds since, strength
 uniform float uHW, uHM, uLove;          // engraving width in heart units; density from ink (1) or light (0)
 uniform vec3 uTear;              // how far each black tear has run, 0..1
 uniform vec2 uLook;              // iris offset towards the cursor, photo px
@@ -580,6 +581,26 @@ void main() {
       if (h2 < 0.26 * dens) {
         float gi = floor(hash(cell + floor(uTime * 0.5 + h0 * 7.0)) * 0.45 * (uN - 1.0));
         outc = mix(vec3(0.30, 0.04, 0.06), vec3(0.34, 0.31, 0.32), step(0.8, h1)) * (0.4 + 0.6 * dens) * glyph(gi, f) * A;
+      }
+    }
+    // each beat sends its words outward: a broken ring of "i love you" leaving the heart, thinning as it goes
+    if (live > 0.0 && m < 0.5) {
+      vec2 rv = (sc - hc0) / uCell;
+      float rr = length(rv * vec2(uCell.x / uCell.y, 1.0));
+      float R0 = 0.42 * hs.y / uCell.y;
+      for (int k = 0; k < 2; k++) {
+        vec2 rp = k == 0 ? uRip.xy : uRip.zw;
+        if (rp.y <= 0.0 || rp.x > 9.0) continue;
+        float rad = R0 + rp.x * (5.5 + 0.12 * R0);
+        float e = floor(rad - rr + 0.5);                                   // 0: the ring, 2: its fainter echo behind
+        if (e != 0.0 && e != 2.0) continue;
+        float ring = floor(rad + 0.5) - e;
+        float n = max(floor(6.2832 * ring * uCell.y / uCell.x), 1.0);
+        float ang = atan(rv.y * uCell.y, rv.x * uCell.x) / 6.2832 + 0.5;
+        float li = loveAt(floor(ang * n + 7.0 * hash(vec2(rp.y * 13.0, 1.0)) + 0.4 * rp.x));
+        float brk = step(0.42, vnoise(vec2(ang * 9.0, rp.y * 31.0 + e)));         // the ring arrives in pieces
+        float fade = rp.y * exp(-rp.x * 0.32) * smoothstep(0.0, 0.25, rp.x) * live * A * (1.0 - 0.3 * e);
+        if (li > -0.5 && brk > 0.0) outc = max(outc, mix(vec3(0.85, 0.14, 0.17), vec3(0.34, 0.05, 0.07), smoothstep(0.0, 7.0, rp.x)) * fade * glyph(uN + 5.0 + li, f));
       }
     }
     // ash: glyphs come off the lower rim and drift down, thinning out
@@ -986,6 +1007,12 @@ const BEATS = (() => {
   }
   return out;
 })();
+function ripples(t) {                                  // the last two beats, for the rings they send out
+  let lo = 0, hi = BEATS.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (BEATS[m][0] <= t) lo = m; else hi = m - 1; }
+  const a = BEATS[lo], b = BEATS[lo - 1] || [t - 99, 0];
+  return t < a[0] ? [99, 0, 99, 0] : [t - a[0], a[1], t - b[0], b[1]];
+}
 function beat(t) {                                     // lub-dub, both soft
   let lo = 0, hi = BEATS.length - 1;
   while (lo < hi) { const m = (lo + hi + 1) >> 1; if (BEATS[m][0] <= t) lo = m; else hi = m - 1; }
@@ -1027,6 +1054,7 @@ function draw(now) {
   gl.uniform2f(U('uHeartC'), EYE.cx + lx, EYE.cy + ly);
   gl.uniform1f(U('uTime'), now / 1000);
   gl.uniform1f(U('uBeat'), beat(now / 1000));
+  gl.uniform4f(U('uRip'), ...(Q.has('norip') ? [99,0,99,0] : ripples(now / 1000)));
   gl.uniform1f(U('uHW'), +(Q.get('hw') || 2.5));
   gl.uniform1f(U('uHM'), +(Q.get('hm') || 0));
   gl.uniform1f(U('uLove'), Q.has('love') ? +Q.get('love') : 1);
